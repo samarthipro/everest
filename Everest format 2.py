@@ -96,7 +96,18 @@ CURRENCY_COLS = [
     "Deductible Recovery",
 ]
 
-DATE_COLS = ["Loss Date", "Report Date", "Close Date", "Policy Effective Date", "Valuation Date"]
+DATE_COLS = [
+    "Loss Date",
+    "Report Date",
+    "Close Date",
+    "Birth Date",
+    "Hire Date",
+    "Policy Effective Date",
+    "Valuation Date",
+]
+
+SHORT_DATE_FORMAT = "m/d/yy"
+ACCOUNTING_FORMAT = r'_(* #,##0.00_);_(* \(#,##0.00\);_(* "-"??_);_(@_)'
 
 OUTPUT_COLUMNS = [
     "Client",
@@ -757,7 +768,21 @@ def _money_from_col(row, column):
         text,
     )
     values = extract_all_money(text)
-    return values[0] if values else 0.0
+    if values:
+        return values[0]
+
+    # GlyphLessFont sometimes omits a visible decimal from the embedded text,
+    # for example `27237` for `272.37` or `307,42458` for `307,424.58`.
+    compact = re.fullmatch(
+        r"\s*(-?)(\d{1,3}(?:,\d{3})*|\d+)(\d{2})\s*",
+        text,
+    )
+    if compact:
+        return clean_money(
+            f"{compact.group(1)}{compact.group(2)}.{compact.group(3)}"
+        )
+
+    return 0.0
 
 
 def _is_noise_row(row):
@@ -1122,7 +1147,41 @@ def process_input_directory(input_dir=INPUT_DIR, output_dir=OUTPUT_DIR):
         print(f"Processing: {pdf_path}")
         rows = extract_format2(pdf_path)
         dataframe = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
-        dataframe.to_excel(output_path, index=False)
+
+        # Write real Excel date values so the workbook can apply Short Date.
+        for column in DATE_COLS:
+            parsed_dates = pd.to_datetime(
+                dataframe[column],
+                format="%m/%d/%Y",
+                errors="coerce",
+            )
+            dataframe[column] = parsed_dates.map(
+                lambda value: value.date() if pd.notna(value) else None
+            )
+
+        with pd.ExcelWriter(
+            output_path,
+            engine="openpyxl",
+            date_format=SHORT_DATE_FORMAT,
+            datetime_format=SHORT_DATE_FORMAT,
+        ) as writer:
+            dataframe.to_excel(writer, index=False)
+            worksheet = writer.sheets["Sheet1"]
+
+            for column in DATE_COLS:
+                column_index = dataframe.columns.get_loc(column) + 1
+                for row_index in range(2, worksheet.max_row + 1):
+                    worksheet.cell(row_index, column_index).number_format = (
+                        SHORT_DATE_FORMAT
+                    )
+
+            for column in CURRENCY_COLS:
+                column_index = dataframe.columns.get_loc(column) + 1
+                for row_index in range(2, worksheet.max_row + 1):
+                    worksheet.cell(row_index, column_index).number_format = (
+                        ACCOUNTING_FORMAT
+                    )
+
         output_paths.append(output_path)
         print(f"  Saved {len(dataframe)} row(s) to: {output_path}")
 
