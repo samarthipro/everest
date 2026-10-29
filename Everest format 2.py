@@ -224,8 +224,8 @@ def _page_to_ocr_words(page):
     for bbox, text, conf in results:
         text = text.strip()
         # EasyOCR can assign low confidence to standalone punctuation. Keep `/`
-        # because it is a meaningful separator in Everest claim numbers.
-        if not text or (float(conf) < 0.25 and text != "/"):
+        # and `|` because OCR can use either for a claim-number separator.
+        if not text or (float(conf) < 0.25 and text not in {"/", "|"}):
             continue
         xs = [pt[0] for pt in bbox]
         ys = [pt[1] for pt in bbox]
@@ -707,6 +707,7 @@ def _is_noise_row(row):
 def _claim_tokens(text):
     text = DATE_RE.sub(" ", text or "")
     text = MONEY_RE.split(text)[0]
+    text = text.replace("|", "/")
     text = re.sub(r"\s*/\s*", " / ", text)
     text = clean_spaces(text).upper()
     if not text or not re.search(r"\d|/", text):
