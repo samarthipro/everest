@@ -38,7 +38,7 @@ POLICY_RE = re.compile(r"\b(?:SI|EF|CC)[A-Z0-9]{8}(?:-\d{3})?\b", re.I)
 NO_CLAIM_RE = re.compile(r"\bNo\s+Claims?\b|\bNo\s+Claim\s+Data\b", re.I)
 TOTAL_RE = re.compile(r"\b(Sub Total|Grand Total|Run Date|Page No|TOTAL|Grand)\b", re.I)
 HEADER_RE = re.compile(
-    r"\b(Claim Number|Claim Status|Closed Date|Carrier:|Insured:|Policy Number:|Policy Period:|Cancel Date:|LOB:|LOSS RUN|Claim|Date|Description|Status)\b",
+    r"\b(Claim Number|Claim Status|Closed Date|Carrier|Insured|Policy Number|Policy Period|Cancel Date|LOB|LOSS RUN|Claim|Date|Description|Status)\b\s*:?",
     re.I,
 )
 
@@ -224,8 +224,8 @@ def _page_to_ocr_words(page):
     for bbox, text, conf in results:
         text = text.strip()
         # EasyOCR can assign low confidence to standalone punctuation. Keep `/`
-        # because it is a meaningful separator in Everest claim numbers.
-        if not text or (float(conf) < 0.25 and text != "/"):
+        # and `|` because both can represent claim-number separators.
+        if not text or (float(conf) < 0.25 and text not in {"/", "|"}):
             continue
         xs = [pt[0] for pt in bbox]
         ys = [pt[1] for pt in bbox]
@@ -341,10 +341,14 @@ def extract_everest_format2_ocr(pdf_path):
                     continue
 
                 if not block["seen_detail"]:
-                    if block["status"] == "CLOSED" and not block["close_date"]:
-                        block["close_date"] = first_date(row["claim"])
+                    # Keep the claim open across page footers and repeated headers.
+                    # Its detail row, including Closed Date, may start the next page.
+                    if _is_noise_row(row):
+                        continue
 
                     if state_match:
+                        if block["status"] == "CLOSED" and not block["close_date"]:
+                            block["close_date"] = first_date(row["claim"])
                         loc_m = STATE_LOC_RE.search(row["description"])
                         if loc_m:
                             block["state"] = loc_m.group(1).upper()
@@ -357,9 +361,6 @@ def extract_everest_format2_ocr(pdf_path):
                         if deductible_here:
                             block["deductible"] = deductible_here
                         block["seen_detail"] = True
-                    elif _is_noise_row(row):
-                        rows.append(_build_f2_row(block))
-                        block = None
                     else:
                         add_text(block["cause_parts"], row["description"])
                         if not block["class_code"]:
@@ -707,11 +708,33 @@ def _is_noise_row(row):
 def _claim_tokens(text):
     text = DATE_RE.sub(" ", text or "")
     text = MONEY_RE.split(text)[0]
+    text = text.replace("|", "/")
     text = re.sub(r"\s*/\s*", " / ", text)
     text = clean_spaces(text).upper()
     if not text or not re.search(r"\d|/", text):
         return []
     return [text]
+
+
+def _normalize_claim_number(parts):
+    claim_number = unique_join(parts).replace("|", "/")
+    claim_number = re.sub(r"\s*/\s*", " / ", claim_number)
+
+    # The common Everest auto format repeats the base claim number around a
+    # two-digit claimant sequence. Restore separators that OCR omitted.
+    auto_match = re.fullmatch(
+        r"(?P<claim>A\d+)\s*/?\s*(?P<base>\d{3}-\d{3}-\d{4})\s+"
+        r"(?P<sequence>\d{2})\s*/?\s*(?P=base)",
+        claim_number,
+        re.I,
+    )
+    if auto_match:
+        return (
+            f"{auto_match.group('claim').upper()} / "
+            f"{auto_match.group('base')} {auto_match.group('sequence')} / "
+            f"{auto_match.group('base')}"
+        )
+    return clean_spaces(claim_number)
 
 
 def _normalize_f2_claim_type(parts, coverage_type):
@@ -786,7 +809,7 @@ def _build_f2_row(block):
     return {
         "Client": ctx.get("client", ""),
         "Carrier Name": "Everest",
-        "Claim Number": unique_join(block["claim_number_parts"]),
+        "Claim Number": _normalize_claim_number(block["claim_number_parts"]),
         "Occurrence Number": "",
         "Policy Number": ctx.get("policy_number", ""),
         "Policy Term": ctx.get("policy_term", ""),
@@ -927,10 +950,14 @@ def extract_everest_format2(pdf_path):
 
                 # --- Post-status, pre-detail rows ---
                 if not block["seen_detail"]:
-                    if block["status"] == "CLOSED" and not block["close_date"]:
-                        block["close_date"] = first_date(row["claim"])
+                    # Keep the claim open across page footers and repeated headers.
+                    # Its detail row, including Closed Date, may start the next page.
+                    if _is_noise_row(row):
+                        continue
 
                     if state_match:
+                        if block["status"] == "CLOSED" and not block["close_date"]:
+                            block["close_date"] = first_date(row["claim"])
                         m = STATE_LOC_RE.search(row["description"])
                         block["state"] = m.group(1).upper()
                         block["vin"] = m.group(2)
@@ -942,10 +969,6 @@ def extract_everest_format2(pdf_path):
                         if deductible_here:
                             block["deductible"] = deductible_here
                         block["seen_detail"] = True
-                    elif _is_noise_row(row):
-                        # Hit a total/header before seeing the detail row — save what we have
-                        rows.append(_build_f2_row(block))
-                        block = None
                     else:
                         add_text(block["cause_parts"], row["description"])
                         if not block["class_code"]:
