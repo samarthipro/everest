@@ -34,7 +34,7 @@ DATE_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
 CLAIM_START_RE = re.compile(r"^A\d{6,}\b", re.I)
 STATUS_RE = re.compile(r"\b(CLOSED|OPEN|ACTIVE|PENDING|REOPENED)\b", re.I)
 STATE_LOC_RE = re.compile(r"\b([A-Z]{2})/([A-Z0-9]+)\b", re.I)
-POLICY_RE = re.compile(r"\b(?:SI|EF|CC)[A-Z0-9]{8}(?:-\d{3})?\b", re.I)
+POLICY_RE = re.compile(r"\b(?:SI|EF|CC)[A-Z0-9]{8}\b", re.I)
 NO_CLAIM_RE = re.compile(r"\bNo\s+Claims?\b|\bNo\s+Claim\s+Data\b", re.I)
 TOTAL_RE = re.compile(r"\b(Sub Total|Grand Total|Run Date|Page No|TOTAL|Grand)\b", re.I)
 HEADER_RE = re.compile(
@@ -42,18 +42,18 @@ HEADER_RE = re.compile(
     re.I,
 )
 
-# Format 2 column x-boundaries, aligned to the report grid.
+# Format 2 column x-boundaries
 COLUMNS = {
-    "claim": (0, 80),
-    "date": (80, 140),
-    "description": (140, 280),
-    "claimant_type": (280, 384),
-    "indemnity": (384, 465),
-    "medical": (465, 536),
-    "expense": (536, 616),
-    "subro": (616, 668),
-    "deductible": (668, 734),
-    "total": (734, 800),
+    "claim": (0, 86),
+    "date": (86, 145),
+    "description": (145, 280),
+    "claimant_type": (280, 382),
+    "indemnity": (382, 456),
+    "medical": (456, 526),
+    "expense": (526, 580),
+    "subro": (580, 650),
+    "deductible": (650, 715),
+    "total": (715, 795),
 }
 
 CURRENCY_COLS = [
@@ -166,27 +166,15 @@ def extract_all_money(text):
 # SCANNED PDF DETECTION & OCR
 # ---------------------------
 def is_scanned_pdf(pdf_path, sample_pages=2):
-    """Detect image-only PDFs and PDFs whose embedded text map is unusable."""
+    """Detect if PDF is scanned (image-based) vs text-based."""
     try:
         with pdfplumber.open(pdf_path) as pdf:
             pages_to_check = min(sample_pages, len(pdf.pages))
             total_words = 0
-            cid_markers = 0
-            replacement_chars = 0
             for i in range(pages_to_check):
-                page = pdf.pages[i]
-                words = page.extract_words()
+                words = pdf.pages[i].extract_words()
                 total_words += len(words)
-                page_text = page.extract_text() or ""
-                cid_markers += len(re.findall(r"\(cid:\d+\)", page_text, re.I))
-                replacement_chars += page_text.count("\ufffd")
-
-            if total_words == 0:
-                return True
-
-            # Some image PDFs expose a corrupt text layer made almost entirely of
-            # CID placeholders. Route those through OCR as well.
-            return cid_markers > total_words * 0.2 or replacement_chars > total_words * 0.2
+            return total_words == 0
     except Exception:
         return False
 
@@ -222,31 +210,19 @@ def _page_to_ocr_words(page):
     results = _get_ocr_reader().readtext(np.array(img), paragraph=False)
     words = []
     for bbox, text, conf in results:
-        text = text.strip()
-        # EasyOCR can assign low confidence to standalone punctuation. Keep `/`
-        # and `|` because both can represent claim-number separators.
-        if not text or (float(conf) < 0.25 and text not in {"/", "|"}):
+        if float(conf) < 0.25 or not text.strip():
             continue
         xs = [pt[0] for pt in bbox]
         ys = [pt[1] for pt in bbox]
         rx0 = min(xs) * x_scale
         rx1 = max(xs) * x_scale
         rtop = min(ys) * y_scale
-        token_matches = list(re.finditer(r"\S+", text))
-        if not token_matches:
+        tokens = text.split()
+        if not tokens:
             continue
-
-        # Place tokens according to their character position inside the OCR box.
-        # Equal-width token placement moves short words across grid boundaries.
-        box_width = max(rx1 - rx0, 1.0)
-        text_width = max(len(text), 1)
-        for token_match in token_matches:
-            token_x0 = rx0 + box_width * token_match.start() / text_width
-            words.append({
-                "x0": token_x0,
-                "top": rtop,
-                "text": token_match.group(0),
-            })
+        token_w = max((rx1 - rx0) / len(tokens), 1.0)
+        for i, tok in enumerate(tokens):
+            words.append({"x0": rx0 + i * token_w, "top": rtop, "text": tok})
     return words
 
 
@@ -293,23 +269,18 @@ def extract_everest_format2_ocr(pdf_path):
         for page_num, page in enumerate(pdf.pages):
             print(f"    OCR page {page_num + 1}/{len(pdf.pages)}...")
             words = _page_to_ocr_words(page)
-            grouped_lines = _group_words_by_line(words)
-            page_text = "\n".join(
-                clean_spaces(" ".join(
-                    word["text"]
-                    for word in sorted(line["words"], key=lambda word: word["x0"])
-                ))
-                for line in grouped_lines
+            page_text = " ".join(
+                w["text"] for w in sorted(words, key=lambda w: (w["top"], w["x0"]))
             )
             _update_f2_context(context, page_text)
 
-            for grouped_line in grouped_lines:
+            for grouped_line in _group_words_by_line(words):
                 row = _row_from_words(grouped_line["words"])
                 if not row["all"]:
                     continue
 
                 starts_claim = bool(CLAIM_START_RE.search(row["claim"]))
-                has_status = bool(STATUS_RE.search(row["all"]))
+                has_status = bool(STATUS_RE.search(row["claim"] or row["all"]))
                 state_match = bool(STATE_LOC_RE.search(row["description"]))
 
                 if starts_claim:
@@ -323,13 +294,12 @@ def extract_everest_format2_ocr(pdf_path):
 
                 if not block["seen_status"]:
                     if has_status:
-                        sm = STATUS_RE.search(row["all"])
+                        sm = STATUS_RE.search(row["claim"] or row["all"])
                         block["status"] = sm.group(1).upper() if sm else ""
-                        block["report_date"] = first_date(row["date"])
+                        block["report_date"] = first_date(row["date"]) or first_date(row["all"])
                         add_text(block["cause_parts"], row["description"])
-                        class_code = _extract_class_code(row["claimant_type"])
-                        if class_code:
-                            block["class_code"] = class_code
+                        if row["claimant_type"]:
+                            block["class_code"] = row["claimant_type"]
                         block["indemnity_reserve"] = _money_from_col(row, "indemnity")
                         block["medical_reserve"] = _money_from_col(row, "medical")
                         block["expense_reserve"] = _money_from_col(row, "expense")
@@ -341,14 +311,8 @@ def extract_everest_format2_ocr(pdf_path):
                     continue
 
                 if not block["seen_detail"]:
-                    # Keep the claim open across page footers and repeated headers.
-                    # Its detail row, including Closed Date, may start the next page.
-                    if _is_noise_row(row):
-                        continue
-
                     if state_match:
-                        if block["status"] == "CLOSED" and not block["close_date"]:
-                            block["close_date"] = first_date(row["claim"])
+                        block["close_date"] = first_date(row["claim"])
                         loc_m = STATE_LOC_RE.search(row["description"])
                         if loc_m:
                             block["state"] = loc_m.group(1).upper()
@@ -361,10 +325,13 @@ def extract_everest_format2_ocr(pdf_path):
                         if deductible_here:
                             block["deductible"] = deductible_here
                         block["seen_detail"] = True
+                    elif _is_noise_row(row):
+                        # The claim detail can continue after a footer/header on the next page.
+                        continue
                     else:
                         add_text(block["cause_parts"], row["description"])
-                        if not block["class_code"]:
-                            block["class_code"] = _extract_class_code(row["claimant_type"])
+                        if not block["class_code"] and row["claimant_type"]:
+                            block["class_code"] = row["claimant_type"]
                     continue
 
                 text_val = row["claimant_type"]
@@ -638,23 +605,10 @@ def _format_valuation_date(text):
 
 
 def _normalize_policy_number(text):
-    normalized = clean_spaces(text).upper()
-    normalized = re.sub(r"\bSI[BS]ML", "SI8ML", normalized)
-    match = POLICY_RE.search(normalized)
+    match = POLICY_RE.search(text or "")
     if match:
         return match.group(0).upper()
-    return normalized.split()[0] if normalized else ""
-
-
-def _add_policy_year_suffix(policy_number, policy_eff_date):
-    """Add Everest's policy-year suffix when the PDF omits it."""
-    if not policy_number or re.search(r"-\d{3}$", policy_number):
-        return policy_number
-    try:
-        year = datetime.strptime(policy_eff_date, "%m/%d/%Y").year
-    except (TypeError, ValueError):
-        return policy_number
-    return f"{policy_number}-{year % 100:02d}1"
+    return clean_spaces(text).split()[0] if clean_spaces(text) else ""
 
 
 def _group_words_by_line(words, tolerance=3):
@@ -709,47 +663,8 @@ def _claim_tokens(text):
     text = DATE_RE.sub(" ", text or "")
     text = MONEY_RE.split(text)[0]
     text = text.replace("|", "/")
-    text = re.sub(r"\s*/\s*", " / ", text)
-    text = clean_spaces(text).upper()
-    if not text or not re.search(r"\d|/", text):
-        return []
-    return [text]
-
-
-def _normalize_claim_number(parts):
-    claim_number = unique_join(parts).replace("|", "/")
-    claim_number = re.sub(r"\s*/\s*", " / ", claim_number)
-
-    # The common Everest auto format repeats the base claim number around a
-    # two-digit claimant sequence. Restore separators that OCR omitted.
-    auto_match = re.fullmatch(
-        r"(?P<claim>A\d+)\s*/?\s*(?P<base>\d{3}-\d{3}-\d{4})\s+"
-        r"(?P<sequence>\d{2})\s*/?\s*(?P=base)",
-        claim_number,
-        re.I,
-    )
-    if auto_match:
-        return (
-            f"{auto_match.group('claim').upper()} / "
-            f"{auto_match.group('base')} {auto_match.group('sequence')} / "
-            f"{auto_match.group('base')}"
-        )
-    return clean_spaces(claim_number)
-
-
-def _normalize_f2_claim_type(parts, coverage_type):
-    claim_type = unique_join(parts)
-    if clean_spaces(coverage_type).lower() == "commercial auto":
-        if claim_type.lower() in {"liability", "physical damage"}:
-            claim_type = f"Auto {claim_type}"
-    return claim_type
-
-
-def _extract_class_code(text):
-    candidate = clean_spaces(text).upper()
-    if re.fullmatch(r"[A-Z0-9-]{3,12}", candidate) and re.search(r"\d", candidate):
-        return candidate
-    return ""
+    tokens = re.findall(r"/|A\d+|[A-Z0-9]+(?:-[A-Z0-9]+)+|[A-Z0-9]+", text, re.I)
+    return [t.upper() for t in tokens if t == "/" or re.search(r"\d", t)]
 
 
 def _new_block(row, context):
@@ -809,16 +724,14 @@ def _build_f2_row(block):
     return {
         "Client": ctx.get("client", ""),
         "Carrier Name": "Everest",
-        "Claim Number": _normalize_claim_number(block["claim_number_parts"]),
+        "Claim Number": unique_join(block["claim_number_parts"]),
         "Occurrence Number": "",
         "Policy Number": ctx.get("policy_number", ""),
         "Policy Term": ctx.get("policy_term", ""),
         "Claimant Name": unique_join(block["claimant_parts"]),
         "Driver Name": "",
         "Defendant Name": "",
-        "Claim Type": _normalize_f2_claim_type(
-            block["claim_type_parts"], ctx.get("coverage_type", "")
-        ),
+        "Claim Type": unique_join(block["claim_type_parts"]),
         "Loss Date": block["loss_date"],
         "Report Date": block["report_date"],
         "Close Date": block["close_date"],
@@ -861,13 +774,9 @@ def _update_f2_context(context, text):
         if m:
             context["valuation_date"] = m.group(1)
 
-        m = re.search(
-            r"Insured:\s*(.+?)(?=\s+(?:Policy Number:|Policy Period:|Cancel Date:|LOB:|LOSS RUN\b)|$)",
-            line,
-            re.I,
-        )
+        m = re.search(r"Insured:\s*(.+)", line, re.I)
         if m:
-            context["client"] = m.group(1).strip(" ;")
+            context["client"] = m.group(1).strip()
 
         m = re.search(r"Policy Number:\s*(.+)", line, re.I)
         if m:
@@ -879,9 +788,6 @@ def _update_f2_context(context, text):
             if len(dates) >= 2:
                 context["policy_term"] = f"{dates[0]} - {dates[1]}"
                 context["policy_eff_date"] = dates[0]
-                context["policy_number"] = _add_policy_year_suffix(
-                    context["policy_number"], context["policy_eff_date"]
-                )
 
         v = _format_valuation_date(line)
         if v:
@@ -916,7 +822,7 @@ def extract_everest_format2(pdf_path):
                     continue
 
                 starts_claim = bool(CLAIM_START_RE.search(row["claim"]))
-                has_status = bool(STATUS_RE.search(row["all"]))
+                has_status = bool(STATUS_RE.search(row["claim"] or row["all"]))
                 state_match = bool(STATE_LOC_RE.search(row["description"]))
 
                 # --- New claim ---
@@ -932,12 +838,11 @@ def extract_everest_format2(pdf_path):
                 # --- Pre-status rows ---
                 if not block["seen_status"]:
                     if has_status:
-                        block["status"] = STATUS_RE.search(row["all"]).group(1).upper()
-                        block["report_date"] = first_date(row["date"])
+                        block["status"] = STATUS_RE.search(row["claim"] or row["all"]).group(1).upper()
+                        block["report_date"] = first_date(row["date"]) or first_date(row["all"])
                         add_text(block["cause_parts"], row["description"])
-                        class_code = _extract_class_code(row["claimant_type"])
-                        if class_code:
-                            block["class_code"] = class_code
+                        if row["claimant_type"]:
+                            block["class_code"] = row["claimant_type"]
                         block["indemnity_reserve"] = _money_from_col(row, "indemnity")
                         block["medical_reserve"] = _money_from_col(row, "medical")
                         block["expense_reserve"] = _money_from_col(row, "expense")
@@ -950,14 +855,8 @@ def extract_everest_format2(pdf_path):
 
                 # --- Post-status, pre-detail rows ---
                 if not block["seen_detail"]:
-                    # Keep the claim open across page footers and repeated headers.
-                    # Its detail row, including Closed Date, may start the next page.
-                    if _is_noise_row(row):
-                        continue
-
                     if state_match:
-                        if block["status"] == "CLOSED" and not block["close_date"]:
-                            block["close_date"] = first_date(row["claim"])
+                        block["close_date"] = first_date(row["claim"])
                         m = STATE_LOC_RE.search(row["description"])
                         block["state"] = m.group(1).upper()
                         block["vin"] = m.group(2)
@@ -969,10 +868,13 @@ def extract_everest_format2(pdf_path):
                         if deductible_here:
                             block["deductible"] = deductible_here
                         block["seen_detail"] = True
+                    elif _is_noise_row(row):
+                        # The claim detail can continue after a footer/header on the next page.
+                        continue
                     else:
                         add_text(block["cause_parts"], row["description"])
-                        if not block["class_code"]:
-                            block["class_code"] = _extract_class_code(row["claimant_type"])
+                        if not block["class_code"] and row["claimant_type"]:
+                            block["class_code"] = row["claimant_type"]
                     continue
 
                 # --- Post-detail rows ---
