@@ -33,7 +33,15 @@ MONEY_RE = re.compile(r"-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+\.\d{2}|\(\d{1,3}(?:,\d
 DATE_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
 CLAIM_START_RE = re.compile(r"^A\d{6,}\b", re.I)
 STATUS_RE = re.compile(r"\b(CLOSED|OPEN|ACTIVE|PENDING|REOPENED)\b", re.I)
-STATE_LOC_RE = re.compile(r"\b([A-Z]{2})/([A-Z0-9]+)\b", re.I)
+STATE_CODE_PATTERN = (
+    r"AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|"
+    r"MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|"
+    r"VT|VA|WA|WV|WI|WY|DC"
+)
+STATE_LOC_RE = re.compile(
+    rf"\b({STATE_CODE_PATTERN})(?:/|I(?=[A-Z0-9]*\d))([A-Z0-9]+)\b",
+    re.I,
+)
 POLICY_RE = re.compile(r"\b(?:SI|EF|CC)[A-Z0-9]{8}(?:-\d{3})?\b", re.I)
 NO_CLAIM_RE = re.compile(r"\bNo\s+Claims?\b|\bNo\s+Claim\s+Data\b", re.I)
 TOTAL_RE = re.compile(r"^\s*(?:Sub Total|Grand Total|Run Date|Page No|TOTAL)\b", re.I)
@@ -50,8 +58,8 @@ HEADER_RE = re.compile(
 COLUMNS = {
     "claim": (0, 80),
     "date": (80, 140),
-    "description": (140, 280),
-    "claimant_type": (280, 384),
+    "description": (140, 279.5),
+    "claimant_type": (279.5, 384),
     "indemnity": (384, 465),
     "medical": (465, 536),
     "expense": (536, 616),
@@ -768,6 +776,19 @@ def _extract_class_code(text):
     return ""
 
 
+def _normalize_claimant_name(parts):
+    claimant = unique_join(parts)
+    claimant = re.sub(r"\bIl(?=,)", "II", claimant)
+
+    # Restore punctuation dropped by the embedded OCR layer for initial-only names.
+    if re.fullmatch(r"[A-Z] [A-Z]\.", claimant):
+        claimant = f"{claimant[0]}. {claimant[-2:]}"
+    elif re.fullmatch(r"[A-Z]\. [A-Z]\.", claimant):
+        claimant = claimant.replace(". ", "., ", 1)
+
+    return claimant
+
+
 def _new_block(row, context):
     block = {
         "context": context.copy(),
@@ -829,7 +850,7 @@ def _build_f2_row(block):
         "Occurrence Number": "",
         "Policy Number": ctx.get("policy_number", ""),
         "Policy Term": ctx.get("policy_term", ""),
-        "Claimant Name": unique_join(block["claimant_parts"]),
+        "Claimant Name": _normalize_claimant_name(block["claimant_parts"]),
         "Driver Name": "",
         "Defendant Name": "",
         "Claim Type": _normalize_f2_claim_type(
