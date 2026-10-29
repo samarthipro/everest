@@ -38,7 +38,7 @@ POLICY_RE = re.compile(r"\b(?:SI|EF|CC)[A-Z0-9]{8}(?:-\d{3})?\b", re.I)
 NO_CLAIM_RE = re.compile(r"\bNo\s+Claims?\b|\bNo\s+Claim\s+Data\b", re.I)
 TOTAL_RE = re.compile(r"\b(Sub Total|Grand Total|Run Date|Page No|TOTAL|Grand)\b", re.I)
 HEADER_RE = re.compile(
-    r"\b(Claim Number|Claim Status|Closed Date|Carrier:|Insured:|Policy Number:|Policy Period:|Cancel Date:|LOB:|LOSS RUN|Claim|Date|Description|Status)\b",
+    r"\b(Claim Number|Claim Status|Closed Date|Carrier|Insured|Policy Number|Policy Period|Cancel Date|LOB|LOSS RUN|Claim|Date|Description|Status)\b\s*:?",
     re.I,
 )
 
@@ -55,6 +55,10 @@ COLUMNS = {
     "deductible": (668, 734),
     "total": (734, 800),
 }
+
+# Include punctuation printed at the right edge of the first grid column when
+# collecting claim-number lines. Other field boundaries remain unchanged.
+CLAIM_CAPTURE_RIGHT = 86
 
 CURRENCY_COLS = [
     "Paid/Loss NOC",
@@ -308,7 +312,7 @@ def extract_everest_format2_ocr(pdf_path):
                 if not row["all"]:
                     continue
 
-                starts_claim = bool(CLAIM_START_RE.search(row["claim"]))
+                starts_claim = bool(CLAIM_START_RE.search(row["claim_number"]))
                 has_status = bool(STATUS_RE.search(row["all"]))
                 state_match = bool(STATE_LOC_RE.search(row["description"]))
 
@@ -335,12 +339,16 @@ def extract_everest_format2_ocr(pdf_path):
                         block["expense_reserve"] = _money_from_col(row, "expense")
                         block["seen_status"] = True
                     elif not _is_noise_row(row):
-                        block["claim_number_parts"].extend(_claim_tokens(row["claim"]))
+                        block["claim_number_parts"].extend(_claim_tokens(row["claim_number"]))
                         add_text(block["description_parts"], row["description"])
                         add_text(block["claimant_parts"], row["claimant_type"])
                     continue
 
                 if not block["seen_detail"]:
+                    if _is_noise_row(row):
+                        # Footer/header rows can separate status from a next-page detail row.
+                        continue
+
                     if block["status"] == "CLOSED" and not block["close_date"]:
                         block["close_date"] = first_date(row["claim"])
 
@@ -357,9 +365,6 @@ def extract_everest_format2_ocr(pdf_path):
                         if deductible_here:
                             block["deductible"] = deductible_here
                         block["seen_detail"] = True
-                    elif _is_noise_row(row):
-                        rows.append(_build_f2_row(block))
-                        block = None
                     else:
                         add_text(block["cause_parts"], row["description"])
                         if not block["class_code"]:
@@ -679,6 +684,7 @@ def _row_from_words(words):
     row = {"all": clean_spaces(" ".join(w["text"] for w in sorted(words, key=lambda w: w["x0"])))}
     for key, (left, right) in COLUMNS.items():
         row[key] = _text_between(words, left, right)
+    row["claim_number"] = _text_between(words, COLUMNS["claim"][0], CLAIM_CAPTURE_RIGHT)
     return row
 
 
@@ -710,9 +716,7 @@ def _claim_tokens(text):
     text = text.replace("|", "/")
     text = re.sub(r"\s*/\s*", " / ", text)
     text = clean_spaces(text).upper()
-    if not text or not re.search(r"\d|/", text):
-        return []
-    return [text]
+    return [text] if text else []
 
 
 def _normalize_f2_claim_type(parts, coverage_type):
@@ -756,7 +760,7 @@ def _new_block(row, context):
         "seen_status": False,
         "seen_detail": False,
     }
-    block["claim_number_parts"].extend(_claim_tokens(row["claim"]))
+    block["claim_number_parts"].extend(_claim_tokens(row["claim_number"]))
     add_text(block["description_parts"], row["description"])
     add_text(block["claimant_parts"], row["claimant_type"])
     return block
@@ -893,7 +897,7 @@ def extract_everest_format2(pdf_path):
                 if not row["all"]:
                     continue
 
-                starts_claim = bool(CLAIM_START_RE.search(row["claim"]))
+                starts_claim = bool(CLAIM_START_RE.search(row["claim_number"]))
                 has_status = bool(STATUS_RE.search(row["all"]))
                 state_match = bool(STATE_LOC_RE.search(row["description"]))
 
@@ -921,13 +925,17 @@ def extract_everest_format2(pdf_path):
                         block["expense_reserve"] = _money_from_col(row, "expense")
                         block["seen_status"] = True
                     elif not _is_noise_row(row):
-                        block["claim_number_parts"].extend(_claim_tokens(row["claim"]))
+                        block["claim_number_parts"].extend(_claim_tokens(row["claim_number"]))
                         add_text(block["description_parts"], row["description"])
                         add_text(block["claimant_parts"], row["claimant_type"])
                     continue
 
                 # --- Post-status, pre-detail rows ---
                 if not block["seen_detail"]:
+                    if _is_noise_row(row):
+                        # Footer/header rows can separate status from a next-page detail row.
+                        continue
+
                     if block["status"] == "CLOSED" and not block["close_date"]:
                         block["close_date"] = first_date(row["claim"])
 
@@ -943,10 +951,6 @@ def extract_everest_format2(pdf_path):
                         if deductible_here:
                             block["deductible"] = deductible_here
                         block["seen_detail"] = True
-                    elif _is_noise_row(row):
-                        # Hit a total/header before seeing the detail row — save what we have
-                        rows.append(_build_f2_row(block))
-                        block = None
                     else:
                         add_text(block["cause_parts"], row["description"])
                         if not block["class_code"]:
