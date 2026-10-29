@@ -68,6 +68,17 @@ COLUMNS = {
     "total": (734, 800),
 }
 
+# Currency values are right-aligned in the PDF. Classifying by their right edge
+# keeps long and negative amounts in the correct financial column.
+FINANCIAL_COLUMNS = {
+    "indemnity": (384, 455),
+    "medical": (455, 525),
+    "expense": (525, 595),
+    "subro": (595, 645),
+    "deductible": (645, 700),
+    "total": (700, 800),
+}
+
 # Include punctuation printed at the right edge of the first grid column when
 # collecting claim-number lines. Other field boundaries remain unchanged.
 CLAIM_CAPTURE_RIGHT = 86
@@ -279,8 +290,10 @@ def _page_to_ocr_words(page):
         text_width = max(len(text), 1)
         for token_match in token_matches:
             token_x0 = rx0 + box_width * token_match.start() / text_width
+            token_x1 = rx0 + box_width * token_match.end() / text_width
             words.append({
                 "x0": token_x0,
+                "x1": token_x1,
                 "top": rtop,
                 "text": token_match.group(0),
             })
@@ -393,12 +406,8 @@ def extract_everest_format2_ocr(pdf_path):
                             block["state"] = loc_m.group(1).upper()
                             block["vin"] = loc_m.group(2)
                         add_text(block["claim_type_parts"], row["claimant_type"])
-                        subro_here = _money_from_col(row, "subro")
-                        if subro_here:
-                            block["subro"] = subro_here
-                        deductible_here = _money_from_col(row, "deductible")
-                        if deductible_here:
-                            block["deductible"] = deductible_here
+                        block["subro"] = _money_from_col(row, "subro")
+                        block["deductible"] = _money_from_col(row, "deductible")
                         block["seen_detail"] = True
                     else:
                         add_text(block["cause_parts"], row["description"])
@@ -715,29 +724,40 @@ def _text_between(words, left, right):
     return clean_spaces(" ".join(selected))
 
 
+def _text_by_right_edge(words, left, right):
+    selected = [
+        word["text"]
+        for word in sorted(words, key=lambda w: w["x0"])
+        if left < word.get("x1", word["x0"]) <= right
+    ]
+    return clean_spaces(" ".join(selected))
+
+
 def _row_from_words(words):
     row = {"all": clean_spaces(" ".join(w["text"] for w in sorted(words, key=lambda w: w["x0"])))}
     for key, (left, right) in COLUMNS.items():
         row[key] = _text_between(words, left, right)
+    for key, (left, right) in FINANCIAL_COLUMNS.items():
+        row[key] = _text_by_right_edge(words, left, right)
     row["claim_number"] = _text_between(words, COLUMNS["claim"][0], CLAIM_CAPTURE_RIGHT)
     return row
 
 
 def _money_from_col(row, column):
-    """Extract money value from column, preserving negative values (for Subro/Salvage)."""
+    """Extract the signed money value from one physical financial column."""
     text = row.get(column, "")
     if not text:
         return 0.0
-    # Extract all money values in case there are multiple
+
+    # The embedded text layer occasionally emits a decimal amount as two words,
+    # for example `3,144 55` instead of `3,144.55`.
+    text = re.sub(
+        r"(?<![\d.])(-?\d+(?:,\d{3})*)\s+(\d{2})(?!\d)",
+        r"\1.\2",
+        text,
+    )
     values = extract_all_money(text)
-    if values:
-        # For subro column, prefer negative values (salvage recovery is typically negative)
-        if column == "subro" and len(values) > 0:
-            # If we have negative values, use the first one; otherwise use last value
-            neg_values = [v for v in values if v < 0]
-            return neg_values[0] if neg_values else (values[-1] if values else 0.0)
-        return values[0]
-    return 0.0
+    return values[0] if values else 0.0
 
 
 def _is_noise_row(row):
@@ -807,8 +827,8 @@ def _new_block(row, context):
         "indemnity_paid": _money_from_col(row, "indemnity"),
         "medical_paid": _money_from_col(row, "medical"),
         "expense_paid": _money_from_col(row, "expense"),
-        "subro": _money_from_col(row, "subro"),
-        "deductible": _money_from_col(row, "deductible"),
+        "subro": 0.0,
+        "deductible": 0.0,
         "indemnity_reserve": 0.0,
         "medical_reserve": 0.0,
         "expense_reserve": 0.0,
@@ -1001,12 +1021,8 @@ def extract_everest_format2(pdf_path):
                         block["state"] = m.group(1).upper()
                         block["vin"] = m.group(2)
                         add_text(block["claim_type_parts"], row["claimant_type"])
-                        subro_here = _money_from_col(row, "subro")
-                        if subro_here:
-                            block["subro"] = subro_here
-                        deductible_here = _money_from_col(row, "deductible")
-                        if deductible_here:
-                            block["deductible"] = deductible_here
+                        block["subro"] = _money_from_col(row, "subro")
+                        block["deductible"] = _money_from_col(row, "deductible")
                         block["seen_detail"] = True
                     else:
                         add_text(block["cause_parts"], row["description"])
