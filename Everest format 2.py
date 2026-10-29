@@ -26,6 +26,9 @@ ENABLE_OCR = True
 
 OCR_DPI = 200  # Resolution for rendering scanned pages (higher = slower but more accurate)
 
+INPUT_DIR = r"C:\Users\Samarth\Documents\LLama\Everest\Input"
+OUTPUT_DIR = r"C:\Users\Samarth\Documents\LLama\Everest\Output"
+
 MONEY_RE = re.compile(r"-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+\.\d{2}|\(\d{1,3}(?:,\d{3})*\.\d{2}\)|\(\d+\.\d{2}\)")
 DATE_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
 CLAIM_START_RE = re.compile(r"^A\d{6,}\b", re.I)
@@ -67,6 +70,47 @@ CURRENCY_COLS = [
 ]
 
 DATE_COLS = ["Loss Date", "Report Date", "Close Date", "Policy Effective Date", "Valuation Date"]
+
+OUTPUT_COLUMNS = [
+    "Client",
+    "Carrier Name",
+    "Claim Number",
+    "Occurrence Number",
+    "Policy Number",
+    "Policy Term",
+    "Claimant Name",
+    "Driver Name",
+    "Defendant Name",
+    "Claim Type",
+    "Loss Date",
+    "Report Date",
+    "Close Date",
+    "Birth Date",
+    "Hire Date",
+    "Policy Effective Date",
+    "Status",
+    "Coverage Type",
+    "Occupation",
+    "Class Code",
+    "Loss Location",
+    "Loss City",
+    "State",
+    "Nature",
+    "Cause",
+    "VIN/Body Part",
+    "Loss Description/Event Description",
+    "Paid/Loss NOC",
+    "Reserve NOC",
+    "Paid Medical/Bodily Injury/Comprehensive/Rehab",
+    "Paid Legal/Expense/LAE/Other losses",
+    "Paid Indemnity/Property Damage/Collision/Disability",
+    "Outstanding Medical/Bodily Injury/Comprehensive/Rehab",
+    "Outstanding Legal/Expense/LAE/Other losses",
+    "Outstanding Indemnity/Property Damage/Collision/Disability",
+    "Recovery/Salvage/Subrogation",
+    "Deductible Recovery",
+    "Valuation Date",
+]
 
 
 # ---------------------------
@@ -897,3 +941,41 @@ def extract_format2(pdf_path):
     return extract_everest_format2(pdf_path)
 
 
+# ---------------------------
+# DIRECTORY RUNNER
+# ---------------------------
+def process_input_directory(input_dir=INPUT_DIR, output_dir=OUTPUT_DIR):
+    """Extract every PDF in the input directory to a matching XLSX file."""
+    if not os.path.isdir(input_dir):
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    pdf_names = sorted(
+        name
+        for name in os.listdir(input_dir)
+        if name.lower().endswith(".pdf")
+        and os.path.isfile(os.path.join(input_dir, name))
+    )
+
+    if not pdf_names:
+        print(f"No PDF files found in: {input_dir}")
+        return []
+
+    output_paths = []
+    for pdf_name in pdf_names:
+        pdf_path = os.path.join(input_dir, pdf_name)
+        output_name = f"{os.path.splitext(pdf_name)[0]}.xlsx"
+        output_path = os.path.join(output_dir, output_name)
+
+        print(f"Processing: {pdf_path}")
+        rows = extract_format2(pdf_path)
+        dataframe = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+        dataframe.to_excel(output_path, index=False)
+        output_paths.append(output_path)
+        print(f"  Saved {len(dataframe)} row(s) to: {output_path}")
+
+    return output_paths
+
+
+if __name__ == "__main__":
+    process_input_directory()
