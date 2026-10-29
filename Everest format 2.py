@@ -36,9 +36,13 @@ STATUS_RE = re.compile(r"\b(CLOSED|OPEN|ACTIVE|PENDING|REOPENED)\b", re.I)
 STATE_LOC_RE = re.compile(r"\b([A-Z]{2})/([A-Z0-9]+)\b", re.I)
 POLICY_RE = re.compile(r"\b(?:SI|EF|CC)[A-Z0-9]{8}(?:-\d{3})?\b", re.I)
 NO_CLAIM_RE = re.compile(r"\bNo\s+Claims?\b|\bNo\s+Claim\s+Data\b", re.I)
-TOTAL_RE = re.compile(r"\b(Sub Total|Grand Total|Run Date|Page No|TOTAL|Grand)\b", re.I)
+TOTAL_RE = re.compile(r"^\s*(?:Sub Total|Grand Total|Run Date|Page No|TOTAL)\b", re.I)
 HEADER_RE = re.compile(
-    r"\b(Claim Number|Claim Status|Closed Date|Carrier|Insured|Policy Number|Policy Period|Cancel Date|LOB|LOSS RUN|Claim|Date|Description|Status)\b\s*:?",
+    r"^\s*(?:(?:Carrier|Insured|Policy Number|Policy Period|Cancel Date|LOB)\s*:"
+    r"|LOSS RUN\b"
+    r"|Claim Number\b.*\bDate of Loss\b"
+    r"|Claim Status\b.*\bDate Reported\b"
+    r"|Closed Date\b.*\bDays Between\b)",
     re.I,
 )
 
@@ -155,6 +159,27 @@ def unique_join(parts):
 def first_date(text):
     match = DATE_RE.search(text or "")
     return format_date(match.group(0)) if match else ""
+
+
+def normalize_close_date(close_date, report_date):
+    """Repair an impossible OCR year using the claim's reported year."""
+    if not close_date:
+        return ""
+    try:
+        parsed_close = datetime.strptime(close_date, "%m/%d/%Y")
+    except ValueError:
+        return ""
+    if 1900 <= parsed_close.year <= 2100:
+        return parsed_close.strftime("%m/%d/%Y")
+
+    try:
+        parsed_report = datetime.strptime(report_date, "%m/%d/%Y")
+        repaired = parsed_close.replace(year=parsed_report.year)
+        if repaired < parsed_report:
+            repaired = repaired.replace(year=parsed_report.year + 1)
+        return repaired.strftime("%m/%d/%Y")
+    except ValueError:
+        return ""
 
 
 def first_money(text):
@@ -350,7 +375,9 @@ def extract_everest_format2_ocr(pdf_path):
                         continue
 
                     if block["status"] == "CLOSED" and not block["close_date"]:
-                        block["close_date"] = first_date(row["claim"])
+                        block["close_date"] = normalize_close_date(
+                            first_date(row["claim"]), block["report_date"]
+                        )
 
                     if state_match:
                         loc_m = STATE_LOC_RE.search(row["description"])
@@ -716,6 +743,13 @@ def _claim_tokens(text):
     text = text.replace("|", "/")
     text = re.sub(r"\s*/\s*", " / ", text)
     text = clean_spaces(text).upper()
+    # Everest's 4A reference identifiers use zero, while the embedded OCR layer
+    # sometimes reads the printed `0` as the letter `O`.
+    text = re.sub(
+        r"\b4A[A-Z0-9]+\b",
+        lambda match: match.group(0).replace("O", "0"),
+        text,
+    )
     return [text] if text else []
 
 
@@ -937,7 +971,9 @@ def extract_everest_format2(pdf_path):
                         continue
 
                     if block["status"] == "CLOSED" and not block["close_date"]:
-                        block["close_date"] = first_date(row["claim"])
+                        block["close_date"] = normalize_close_date(
+                            first_date(row["claim"]), block["report_date"]
+                        )
 
                     if state_match:
                         m = STATE_LOC_RE.search(row["description"])
